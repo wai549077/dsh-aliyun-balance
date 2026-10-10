@@ -1,0 +1,70 @@
+{
+  "name": "dsh-aliyun-balance",
+  "version": "0.1.2",
+  "description": "阿里云代金券 / 余额看板（DSH 插件）：券 + 账户余额合计、券失效时间，界面悬浮一行挂件，可拖动，配色跟随主题。适合用阿里云代金券 / 余额付费的用户（典型场景：高校「云工开物」学生专属券 + 千问平台 API 接入 DSH）",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/normalize.js",
+    "lib/bss-client.js",
+    "lib/cache.js",
+    "assets",
+    "cordis.patch.yml",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "aliyun",
+    "aliyun-balance",
+    "coupon",
+    "voucher",
+    "balance",
+    "widget"
+  ],
+  "license": "MIT",
+  "author": {
+    "name": "wai549077",
+    "email": "291801365+wai549077@users.noreply.github.com",
+    "url": "https://github.com/wai549077"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wai549077/dsh-aliyun-balance.git"
+  },
+  "homepage": "https://github.com/wai549077/dsh-aliyun-balance#readme",
+  "bugs": {
+    "url": "https://github.com/wai549077/dsh-aliyun-balance/issues"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dshhub": {
+    "schemaVersion": 1,
+    "displayName": "阿里云余额与代金券",
+    "summary": "在 DSH 界面悬浮一行，显示「还能用的钱」= 阿里云代金券余额 + 账户余额；悬停看券面值/已用、最早失效时间、现金/信控。只读 BSS 接口，只报存量，不做消费统计。",
+    "categories": [
+      "费用",
+      "Web UI"
+    ],
+    "surfaces": [
+      "host",
+      "web"
+    ],
+    "permissions": {
+      "network": [
+        "https://*.aliyuncs.com"
+      ]
+    }
+  }
+}

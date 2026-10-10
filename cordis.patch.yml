@@ -1,0 +1,4 @@
+# dsh-aliyun-balance 挂载声明
+- insert:
+    - id: dsh-aliyun-balance
+      name: dsh-aliyun-balance
