@@ -34,7 +34,8 @@
 DSH 是从**本地目录**装插件的：先在一个固定位置拿到本插件的目录，再让 DSH 装上。
 下面几种方式拿到的目录内容一致，区别只是你怎么拿到它。
 
-> 本仓库发布后即可从 GitHub 克隆。npm 包与插件市场直装随后上线 —— 上线后一句话即可：
+> **npm 包已上线**（[dsh-aliyun-balance](https://www.npmjs.com/package/dsh-aliyun-balance)），
+> GitHub 仓库也已公开。插件市场直装随后上线 —— 上线后一句话即可：
 > 对 DSH 说「把 dsh-aliyun-balance 装上」，它会调用内置的 `plugin_manager` 装进 `desktop` profile。
 
 ### 从 GitHub 克隆（推荐）
@@ -257,6 +258,14 @@ node test/normalize.test.mjs      # 单跑一个文件
 - `lib/cache.js` 新鲜度判定
 - `assets/widget.js` 前端挂件：那一行 + 悬停卡片 + 面板（原生 DOM，无构建步骤）
 - `test/` 6 个测试文件；`test/widget.test.mjs` 用桩 DOM 直接评测真实前端文件
+
+---
+
+## 关于
+
+本插件**由 AI 辅助完成** —— 代码、文档与测试均在 AI 协助下迭代产出，经人工审阅与实测。
+
+（界面上那一行显示的是你自己的阿里云数据，插件不上传任何信息。）
 
 ---
 
