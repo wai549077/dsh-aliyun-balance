@@ -1,6 +1,6 @@
 {
   "name": "dsh-aliyun-balance",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "阿里云代金券 / 余额看板（DSH 插件）：券 + 账户余额合计、券失效时间，界面悬浮一行挂件，可拖动，配色跟随主题。适合用阿里云代金券 / 余额付费的用户（典型场景：高校「云工开物」学生专属券 + 千问平台 API 接入 DSH）",
   "type": "module",
   "main": "lib/index.js",
