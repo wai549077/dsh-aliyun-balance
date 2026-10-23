@@ -758,6 +758,68 @@
         y: Math.min(Math.max(0, ny), Math.max(0, VH - H)),
       }
     },
+
+    /**
+     * 官方 DSH 的顶栏高度兜底（内核在 win32 注入 --dsh-windows-titlebar-height:40px，
+     * 读不到时用它）。
+     */
+    TITLEBAR_H: 40,
+
+    /**
+     * 允许挂件到达的最高 y。0 = 不设墙（Desktop 的 GitHub 行为：只有视口钳制）。
+     * 官方 DSH 启动时改成顶栏高度，于是往上拖会被标题栏挡住 —— 与 Desktop 的观感一致。
+     *
+     * 这条墙同时保证挂件永远压不到右上角那三个原生窗口按钮（最小化/最大化/关闭，
+     * 它们在「y < 顶栏高度」的右侧）：那是 Windows 画的非客户区，点下去会直接关窗口。
+     */
+    topLimit: 0,
+
+    /**
+     * 探测顶部挡墙高度：**只有官方 DSH 有墙**（Desktop 返回 0，位置行为与 GitHub 版一致）。
+     *
+     * 为什么官方必须挡、Desktop 不用：Desktop 的顶栏在独立 native-ui 层（z-index 2147483647，
+     * 比挂件的 21 亿还高），本来就把挂件盖住、拖不过去；而官方 DSH 的 drag 带是本文档里一个
+     * z-index auto 的伪元素（`[data-windows-titlebar] .BynINW_frame:before`），盖不住挂件 ——
+     * 挂件能滑进去，然后收不到任何指针事件（点不动、也拖不出来）。显式把上界设在它下缘即可。
+     *
+     * 判据：`<html data-windows-titlebar>` + 内联 --dsh-windows-titlebar-height，
+     * 两者都由官方内核 preload 同步写入，插件脚本一定跑在它们之后。
+     */
+    detectTopLimit: function (doc) {
+      var d = doc || (typeof document !== 'undefined' ? document : null)
+      var root = d && d.documentElement
+      var marked = false
+      try {
+        marked = !!(root && typeof root.hasAttribute === 'function' && root.hasAttribute('data-windows-titlebar'))
+      } catch (e) { marked = false }
+      if (!marked) return 0
+
+      var raw = ''
+      try {
+        raw = (root.style && typeof root.style.getPropertyValue === 'function')
+          ? (root.style.getPropertyValue('--dsh-windows-titlebar-height') || '') : ''
+      } catch (e) { raw = '' }
+      var v = parseFloat(raw)
+      return (isFinite(v) && v >= 12 && v <= 96) ? Math.round(v) : this.TITLEBAR_H
+    },
+
+    /** 只校验纵向：抬到挡墙之上，同时不破坏「整体可见」的上界 */
+    topWallY: function (y, h, vh) {
+      var num = function (v, d) { var n = Number(v); return isFinite(n) ? n : d }
+      var H = Math.max(0, num(h, 0))
+      var VH = num(vh, 768)
+      var ny = num(y, 0)
+      var top = Math.min(this.topLimit, Math.max(0, VH - H))
+      var bottom = Math.max(top, VH - H)
+      return Math.min(Math.max(top, ny), bottom)
+    },
+
+    /** clampPos + 顶部挡墙。拖动与存档恢复都走这里；topLimit=0 时与 clampPos 完全等价 */
+    clampSafe: function (x, y, w, h, vw, vh) {
+      var p = this.clampPos(x, y, w, h, vw, vh)
+      p.y = this.topWallY(p.y, h, vh)
+      return p
+    },
     parsePos: function (raw) {
       try {
         var o = JSON.parse(raw)
@@ -945,6 +1007,8 @@
   var lastPosSig = null
   var posSeq = 0
   var lastLoggedSeq = -1
+  // 挡墙纠正只打一次点：applyPosition 会被看门狗/缩放重跑，日志是 200 行环形缓冲，不能刷屏
+  var wallNoted = false
 
   /**
    * 默认悬浮锚点：实测默认位钳进当前视口（窗口比拖放时小也不出界）。
@@ -981,9 +1045,17 @@
         topPx = vhNow - saved.b - CHIP_H
         topPx = Math.min(Math.max(0, topPx), Math.max(0, vhNow - CHIP_H))
       }
-      rs.left = saved.x + 'px'; rs.top = topPx + 'px'
+      // 顶部挡墙：官方 DSH 上旧存档若落在标题栏带子里（y<40），启动时抬回墙下方 ——
+      // 那一带点不动也拖不出来，用户自己救不回来。
+      // topLimit=0（Desktop）时**连这一步都不做**，存档怎么恢复就怎么恢复，与 GitHub 版一致。
+      var safeTop = ChipCore.topLimit > 0 ? ChipCore.topWallY(topPx, CHIP_H, vhNow) : topPx
+      if (safeTop !== topPx && !wallNoted) {
+        wallNoted = true
+        ping('top-wall', null, 'from=' + Math.round(topPx) + ';to=' + Math.round(safeTop) + ';vh=' + Math.round(vhNow))
+      }
+      rs.left = saved.x + 'px'; rs.top = safeTop + 'px'
       rs.width = ''
-      S.anchor = { x: saved.x, y: topPx }
+      S.anchor = { x: saved.x, y: safeTop }
     } else if (found) {
       S.mode = 'dock'
       r = found.rect
@@ -1479,6 +1551,10 @@
     })
     document.addEventListener('pointermove', function (ev) {
       if (!dragStart) return
+      // 兜底：指针越过挡墙进了窗口拖拽带时，Electron 会把后续手势当拖窗口，pointerup
+      // 永远送不到网页 —— 回到页面后的第一下移动一定带着 buttons=0。这里立刻收尾，
+      // 免得 S.dragging / 全局禁选类一直卡到看门狗的 30 秒（悬停不弹、下一次点击被吃掉）。
+      if (ev && ev.buttons === 0) { endDrag(); return }
       if (ChipCore.gesture(ev.clientX - dragStart.x, ev.clientY - dragStart.y) !== 'drag') return
       dragStart.moved = true
       S.dragging = true
@@ -1508,10 +1584,11 @@
       // 钳制必须用**实测**宽高：写死 160 会让右边缘超出视口（那一行 min-width 是 172px），
       // 把右对齐的金额切掉；纵向写死 24 也会切掉底部 8px。
       // 测不到时退回那一行的实际下限（min-width 172 / 高 32），宁可保守也不要溢出。
+      // 用 clampSafe 而不是 clampPos：官方 DSH 上还有一道顶部挡墙（挂件不许滑进标题栏拖拽区）。
       var rb2 = boxOf(el.root)
       var rw = (rb2 && rb2.width) || CHIP_W_CLAMP
       var rh = (rb2 && rb2.height) || CHIP_H
-      var c = ChipCore.clampPos(
+      var c = ChipCore.clampSafe(
         dragStart.rootLeft + ev.clientX - dragStart.x,
         dragStart.rootTop + ev.clientY - dragStart.y,
         rw, rh, vw, vh,
@@ -2153,6 +2230,9 @@
     ping('apply')
     function boot() {
       loadPrefs() // 自定义外观/锁定状态先于首帧 render 生效
+      // 顶部挡墙：只有官方 DSH 需要（它的 drag 带在本文档里、盖不住挂件）。
+      // Desktop 探测结果是 0 —— 位置行为与 GitHub 版完全一致。
+      ChipCore.topLimit = ChipCore.detectTopLimit(document)
       build()
       applyPosition()
       render()

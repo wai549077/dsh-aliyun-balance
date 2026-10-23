@@ -89,6 +89,13 @@ function makeEnv(responses = [], lsPreload, setup, opts) {
 }
 const flush = () => new Promise((r) => setTimeout(r, 0))
 
+/** 让 DOM 桩长得像官方 DSH：<html data-windows-titlebar> + 内联顶栏高度（默认 40px） */
+const officialSetup = (dom, px) => {
+  dom.documentElement._attrs['data-windows-titlebar'] = ''
+  const h = typeof px === 'number' ? px : 40 // makeEnv 会把 win 当第二参传进来
+  dom.documentElement.style.getPropertyValue = () => (h + 'px')
+}
+
 const OVERVIEW_OK = {
   ok: true, stale: false, generatedAt: Date.parse('2026-10-03T04:00:00Z'), currency: 'CNY',
   dataAsOf: { balance: 1, coupons: 1 },
@@ -309,6 +316,169 @@ test('ChipCore：手势阈值 / 视口钳制 / 位置解析 / 侧边栏几何判
   assert.equal(c.isSidebarNav({ left: 40, width: 400, height: 600 }), false)
   assert.equal(c.isSidebarNav({ left: 0, width: 40, height: 600 }), false)
   assert.equal(c.isSidebarNav({ left: 0, width: 260, height: 100 }), false)
+})
+
+test('官方 DSH 顶部挡墙：往上拖被标题栏那一栏挡住；Desktop 不设墙（GitHub 版行为）', async () => {
+  const env = makeEnv()
+  const c = env.win.__DSHAB__.chipCore
+
+  // Desktop（桩里没有 data-windows-titlebar）：挡墙高度 0 → clampSafe 与 clampPos 完全等价，
+  // 位置行为与 GitHub 上的 v0.1.2 逐字节一致（仍然可以贴到 y=0）。
+  assert.equal(c.topLimit, 0, 'Desktop 不设墙')
+  assert.deepEqual(c.clampSafe(0, 0, 172, 32, 1024, 768), { x: 0, y: 0 }, 'Desktop 仍可贴顶')
+  assert.deepEqual(c.clampSafe(5000, 5000, 172, 32, 1024, 768), { x: 852, y: 736 })
+  assert.deepEqual(c.clampSafe(NaN, NaN, 172, 32, 1024, 768), { x: 0, y: 0 })
+
+  // 官方 DSH：<html data-windows-titlebar> + 内核 preload 内联的顶栏高度
+  const env2 = makeEnv([], null, officialSetup)
+  const c2 = env2.win.__DSHAB__.chipCore
+  assert.equal(c2.topLimit, 40, '官方挡墙 = 顶栏高度')
+  assert.equal(c2.clampSafe(0, 0, 172, 32, 1024, 768).y, 40, 'y=0 被挡到标题栏下缘')
+  assert.equal(c2.clampSafe(0, 39, 172, 32, 1024, 768).y, 40, '差 1px 也补上')
+  assert.equal(c2.clampSafe(0, 40, 172, 32, 1024, 768).y, 40, '墙下沿可以停')
+  assert.equal(c2.clampSafe(0, 300, 172, 32, 1024, 768).y, 300, '墙下方不受影响')
+  assert.equal(c2.clampSafe(0, -50, 172, 32, 1024, 768).y, 40, '负坐标也抬到墙下沿')
+  assert.deepEqual(c2.clampSafe(5000, 5000, 172, 32, 1024, 768), { x: 852, y: 736 }, '右/下界照旧')
+  // 视口比「墙 + 元素高」还矮时退化成「整体可见」的上界，不能把挂件顶出屏幕
+  assert.equal(c2.clampSafe(0, 0, 172, 32, 160, 40).y, 8, 'vh-h=8 < 40，取 8')
+  assert.equal(c2.topWallY(NaN, 32, 768), 40, '非法输入不产生 NaN')
+
+  // detectTopLimit：官方读变量 / 兜底 40 / Desktop 0
+  const docOf = (px) => ({
+    documentElement: {
+      hasAttribute: (a) => a === 'data-windows-titlebar',
+      style: { getPropertyValue: () => (px == null ? '' : px + 'px') },
+    },
+  })
+  assert.equal(c2.detectTopLimit(docOf(40)), 40)
+  assert.equal(c2.detectTopLimit(docOf(36)), 36, '变量是多少就用多少')
+  assert.equal(c2.detectTopLimit(docOf('')), 40, '没读到值用源码里的 40px')
+  assert.equal(c2.detectTopLimit({ documentElement: { hasAttribute: () => false } }), 0, 'Desktop 不设墙')
+
+  // 拖动路径也要走挡墙（不能只在单元层面生效）
+  const env3 = makeEnv([
+    { match: '/dsh-aliyun-balance/overview.json', payload: OVERVIEW_OK },
+    { match: '/dsh-aliyun-balance/settings.json', payload: SETTINGS_OK() },
+  ], null, officialSetup)
+  await flush()
+  const api3 = env3.win.__DSHAB__
+  api3.el.root.getBoundingClientRect = () => ({ left: 828, top: 690, width: 172, height: 32, right: 1000, bottom: 722 })
+  api3.el.root.style.left = '828px'
+  api3.el.root.style.top = '690px'
+  api3.el.chip.dispatch('pointerdown', { clientX: 900, clientY: 700 })
+  env3.dom.dispatch('pointermove', { clientX: 900, clientY: -5000 })
+  assert.equal(api3.el.root.style.top, '40px', '官方 DSH 上往上拖被挡墙挡住')
+  env3.dom.dispatch('pointerup', { clientX: 900, clientY: -5000 })
+
+  // 存档恢复：官方把标题栏里的旧存档抬回 40；Desktop 原样不动
+  const env4 = makeEnv([], { 'dshab.chipPos': '{"mode":"float","x":1110,"y":0}' }, (dom, win) => {
+    officialSetup(dom)
+    win.innerWidth = 1282
+    win.innerHeight = 822
+  })
+  await flush()
+  assert.equal(env4.win.__DSHAB__.el.root.style.top, '40px', '旧存档在标题栏里 → 启动即抬回墙下方')
+  assert.equal(env4.win.__DSHAB__.el.root.style.left, '1110px', '横向不动')
+
+  const env5 = makeEnv([], { 'dshab.chipPos': '{"mode":"float","x":200,"y":0}' })
+  await flush()
+  assert.equal(env5.win.__DSHAB__.el.root.style.top, '0px', 'Desktop 的 y=0 存档原样恢复（GitHub 版行为）')
+})
+
+test('属性测试：clampSafe 对任意输入都不越界、不穿墙、不产生 NaN（2000 组）', async () => {
+  const env = makeEnv()
+  const cores = [env.win.__DSHAB__.chipCore]
+  const env2 = makeEnv([], null, officialSetup)
+  cores.push(env2.win.__DSHAB__.chipCore)
+
+  // 固定种子的 LCG（Math.imul 保证 32 位不丢精度）：可复现，失败时能按种子重跑
+  let seed = 20261023
+  const rnd = () => {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0
+    return seed / 4294967296
+  }
+  const pick = (min, max) => min + Math.floor(rnd() * (max - min + 1))
+
+  for (let i = 0; i < 2000; i++) {
+    const vw = pick(120, 2560)
+    const vh = pick(80, 1600)
+    const w = pick(1, 400)
+    const h = pick(1, 200)
+    const x = pick(-2000, 4000)
+    const y = pick(-2000, 4000)
+
+    for (const c of cores) {
+      const p = c.clampSafe(x, y, w, h, vw, vh)
+      const top = Math.min(c.topLimit, Math.max(0, vh - h))
+      assert.ok(isFinite(p.x) && isFinite(p.y), '不得算出 NaN')
+      assert.ok(p.x >= 0 && p.y >= 0, '不得为负')
+      assert.ok(p.x <= Math.max(0, vw - w), '右缘不得越界')
+      assert.ok(p.y <= Math.max(0, vh - h), '下缘不得越界')
+      assert.ok(p.y >= top, '不得穿墙（topLimit=' + c.topLimit + '，vh=' + vh + '）')
+    }
+  }
+})
+
+test('位置写入路径全覆盖：停靠拖出 / b 锚定换算 / 双击复位都过挡墙；指针被窗口拖走时立刻收尾', async () => {
+  const ROUTES = [
+    { match: '/dsh-aliyun-balance/overview.json', payload: OVERVIEW_OK },
+    { match: '/dsh-aliyun-balance/settings.json', payload: SETTINGS_OK() },
+  ]
+
+  // ① 从停靠拖出转悬浮：转换用的是实测矩形（顶部可能贴着内容区上沿），同样要落在墙下
+  const nav = makeNode('nav')
+  nav.getBoundingClientRect = () => ({ left: 0, top: 0, width: 260, height: 600, right: 260, bottom: 600 })
+  const envDock = makeEnv(ROUTES, null, (dom) => {
+    officialSetup(dom)
+    dom.querySelectorAll = () => [nav]
+  }, { dock: true })
+  await flush()
+  const apiDock = envDock.win.__DSHAB__
+  assert.equal(apiDock.S.mode, 'dock', '前置：停在侧栏')
+  apiDock.el.root.getBoundingClientRect = () => ({ left: 0, top: 0, width: 260, height: 32, right: 260, bottom: 32 })
+  apiDock.el.chip.dispatch('pointerdown', { clientX: 100, clientY: 10 })
+  envDock.dom.dispatch('pointermove', { clientX: 110, clientY: 10, buttons: 1 })
+  assert.equal(apiDock.S.mode, 'float', '拖动即转悬浮')
+  assert.equal(parseFloat(apiDock.el.root.style.top), 40, '从停靠拖出也不许穿墙')
+  envDock.dom.dispatch('pointerup', { clientX: 110, clientY: 10 })
+
+  // ② 窗口变矮时的 b 锚定换算：300-250-32=18，会被挡墙抬到 40
+  //    （存档按真实格式带 y —— parsePos 要求 x/y 都是数字，否则整条存档作废）
+  const envB = makeEnv(ROUTES, { 'dshab.chipPos': '{"mode":"float","x":10,"y":681.6,"b":250}' }, (dom, win) => {
+    officialSetup(dom)
+    win.innerWidth = 1024
+    win.innerHeight = 300
+  })
+  await flush()
+  assert.equal(envB.win.__DSHAB__.el.root.style.top, '40px', 'b 锚定换算结果也不许穿墙')
+
+  // ③ 双击复位：存档先被抬到墙下，复位回默认（贴底）位也天然在墙下
+  const envReset = makeEnv(ROUTES, { 'dshab.chipPos': '{"mode":"float","x":10,"y":0}' }, officialSetup)
+  await flush()
+  const apiReset = envReset.win.__DSHAB__
+  assert.equal(apiReset.el.root.style.top, '40px', '前置：旧存档已抬到墙下')
+  apiReset.el.chip.dispatch('dblclick')
+  assert.ok(parseFloat(apiReset.el.root.style.top) >= 40, '复位后的默认位也必须在墙下')
+  assert.equal(envReset.ls.getItem('dshab.chipPos'), null, '复位要清掉存档')
+
+  // ④ 指针被窗口拖拽抢走：pointerup 丢失后，回到页面的第一下移动（buttons=0）必须立刻收尾，
+  //    不能等看门狗 30 秒（期间悬停不弹、下一次点击被吃掉）
+  const envDrag = makeEnv(ROUTES, null, officialSetup)
+  await flush()
+  const api = envDrag.win.__DSHAB__
+  api.el.root.getBoundingClientRect = () => ({ left: 100, top: 400, width: 172, height: 32, right: 272, bottom: 432 })
+  api.el.root.style.left = '100px'
+  api.el.root.style.top = '400px'
+  api.el.chip.dispatch('pointerdown', { clientX: 150, clientY: 410 })
+  envDrag.dom.dispatch('pointermove', { clientX: 160, clientY: -5000, buttons: 1 })
+  assert.equal(api.S.dragging, true, '前置：已进入拖动')
+  assert.ok(api.S.pressAt > 0, '前置：按住计时已开始')
+  assert.equal(parseFloat(api.el.root.style.top), 40, '拖到顶停在墙下')
+  envDrag.dom.dispatch('pointermove', { clientX: 160, clientY: 300, buttons: 0 })
+  assert.equal(api.S.dragging, false, 'buttons=0 必须立刻收尾')
+  assert.equal(api.S.pressAt, 0, '按住计时要清零')
+  assert.ok(!envDrag.dom.documentElement._classes.includes('dshab-grabbing'), '抓取光标要摘掉')
+  assert.ok(!envDrag.dom.documentElement._classes.includes('dshab-noselect'), '全局禁选要摘掉')
 })
 
 test('停靠（显式开启）：贴在侧边栏轨道内；localStorage 浮点位置优先；双击复位', async () => {
