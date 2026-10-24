@@ -4,6 +4,9 @@ import { normalizeBalance, normalizeCoupons, buildOverview } from '../lib/normal
 
 // 现在本文件只覆盖余额 / 代金券归一化与 buildOverview 的顶层契约。
 
+/** 夹具日期一律相对当前时间：写死未来日期会在那天让测试自己变红 */
+const isoInDays = (n) => new Date(Date.now() + n * 86400000).toISOString()
+
 test('余额归一化', () => {
   const b = normalizeBalance({ Data: { AvailableAmount: '26.72', AvailableCashAmount: '26.72', CreditAmount: '0.00', Currency: 'CNY' } })
   assert.deepEqual(b, { available: '26.72', cash: '26.72', credit: '0.00', mybankCredit: null, quotaLimit: null, currency: 'CNY' })
@@ -11,8 +14,8 @@ test('余额归一化', () => {
 
 test('券归一化：可用余额求和 + 排序 + 空列表', () => {
   const raw = { Data: [
-    { CashCouponId: 2, CashCouponNo: 'Q-b', NominalValue: '100', Balance: '0', Status: 'Expired', ExpiryTime: '2026-01-01T00:00:00Z' },
-    { CashCouponId: 1, CashCouponNo: 'Q-a', NominalValue: '300', Balance: '300', Status: 'Available', ExpiryTime: '2027-09-01T00:00:00Z', ApplicableScenarios: '阿里云按量付费账单' },
+    { CashCouponId: 2, CashCouponNo: 'Q-b', NominalValue: '100', Balance: '0', Status: 'Expired', ExpiryTime: isoInDays(-30) },
+    { CashCouponId: 1, CashCouponNo: 'Q-a', NominalValue: '300', Balance: '300', Status: 'Available', ExpiryTime: isoInDays(300), ApplicableScenarios: '阿里云按量付费账单' },
   ] }
   const c = normalizeCoupons(raw)
   assert.equal(c.availableBalance, '300.00')
@@ -74,11 +77,11 @@ test('归一化边界：缺字段按 0、非法值按 0、金额恒为两位小�
 
 test('券排序：可用券在前，其余按失效时间升序（缺失排最后）', () => {
   const { items } = normalizeCoupons({ Data: [
-    { CashCouponNo: 'exp-late', Status: 'Expired', Balance: '1', ExpiryTime: '2026-12-01T00:00:00Z' },
+    { CashCouponNo: 'exp-late', Status: 'Expired', Balance: '1', ExpiryTime: isoInDays(-10) },
     { CashCouponNo: 'no-expiry', Status: 'Expired', Balance: '1' },
-    { CashCouponNo: 'exp-early', Status: 'Expired', Balance: '1', ExpiryTime: '2026-02-01T00:00:00Z' },
-    { CashCouponNo: 'avail-late', Status: 'available', Balance: '2', ExpiryTime: '2027-12-01T00:00:00Z' },
-    { CashCouponNo: 'avail-early', Status: 'Available', Balance: '3', ExpiryTime: '2027-01-01T00:00:00Z' },
+    { CashCouponNo: 'exp-early', Status: 'Expired', Balance: '1', ExpiryTime: isoInDays(-90) },
+    { CashCouponNo: 'avail-late', Status: 'available', Balance: '2', ExpiryTime: isoInDays(400) },
+    { CashCouponNo: 'avail-early', Status: 'Available', Balance: '3', ExpiryTime: isoInDays(120) },
   ] })
   assert.deepEqual(items.map((i) => i.no), ['avail-early', 'avail-late', 'exp-early', 'exp-late', 'no-expiry'])
   assert.equal(items[0].balance, '3.00')

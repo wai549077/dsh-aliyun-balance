@@ -8,6 +8,15 @@ import url from 'node:url'
 const here = path.dirname(url.fileURLToPath(import.meta.url))
 const WIDGET_SRC = fs.readFileSync(path.join(here, '../assets/widget.js'), 'utf8')
 
+/**
+ * 相对当前时间的 ISO。夹具里不能写死未来日期 —— 2027-09-01 这种「看起来很远」的字面量
+ * 到那天会集体变红，代码一行没改却测试全挂。过期时间同理，用负数表示。
+ */
+const isoInDays = (n) => new Date(Date.now() + n * 86400000).toISOString()
+const EXP_SOON = isoInDays(60)    // 可用券里较早失效的那张
+const EXP_LATER = isoInDays(400)  // 可用券里较晚失效的那张
+const EXPIRED = isoInDays(-30)    // 已过期券（状态本身才是判据，日期只是干扰项）
+
 function makeNode(tag) {
   const node = {
     tag, children: [], style: {}, id: '', type: '', title: '', value: '', _text: '', _listeners: {},
@@ -100,7 +109,7 @@ const OVERVIEW_OK = {
   ok: true, stale: false, generatedAt: Date.parse('2026-10-03T04:00:00Z'), currency: 'CNY',
   dataAsOf: { balance: 1, coupons: 1 },
   balance: { available: '26.72', cash: '26.72', credit: '0.00' },
-  coupons: { availableBalance: '300.00', items: [{ id: '1', no: 'Q-a', nominalValue: '300.00', balance: '300.00', status: 'Available', expiryTime: '2027-09-01T00:00:00Z' }] },
+  coupons: { availableBalance: '300.00', items: [{ id: '1', no: 'Q-a', nominalValue: '300.00', balance: '300.00', status: 'Available', expiryTime: EXP_LATER }] },
   errors: [],
 }
 const SETTINGS_OK = (extra) => ({ ok: true, settings: Object.assign({ hasAk: true, hasSk: true, balanceRefreshMs: 300000 }, extra || {}) })
@@ -197,9 +206,9 @@ test('券可用状态与宿主同口径：AvailableToUse / 大小写都算，过
   // 而头部的可用合计走服务端算好的值、不受影响 → 症状是卡片内部自相矛盾。
   const payload = JSON.parse(JSON.stringify(OVERVIEW_OK))
   payload.coupons.items = [
-    { id: '1', no: 'Q-a', nominalValue: '100.00', balance: '100.00', status: 'AvailableToUse', expiryTime: '2027-09-01T00:00:00Z' },
-    { id: '2', no: 'Q-b', nominalValue: '50.00', balance: '50.00', status: 'available', expiryTime: '2026-12-01T00:00:00Z' },
-    { id: '3', no: 'Q-c', nominalValue: '30.00', balance: '30.00', status: 'Expired', expiryTime: '2026-01-01T00:00:00Z' },
+    { id: '1', no: 'Q-a', nominalValue: '100.00', balance: '100.00', status: 'AvailableToUse', expiryTime: EXP_LATER },
+    { id: '2', no: 'Q-b', nominalValue: '50.00', balance: '50.00', status: 'available', expiryTime: EXP_SOON },
+    { id: '3', no: 'Q-c', nominalValue: '30.00', balance: '30.00', status: 'Expired', expiryTime: EXPIRED },
   ]
   payload.coupons.availableBalance = '150.00'
   const env = makeEnv([
@@ -213,8 +222,8 @@ test('券可用状态与宿主同口径：AvailableToUse / 大小写都算，过
   const ht = textOf(api.el.hover)
   assert.ok(ht.includes('¥150.00'), '面值 = 100 + 50：AvailableToUse 与 available 都要算进来')
   assert.ok(!ht.includes('¥180.00'), '过期券不计入面值')
-  assert.ok(ht.includes('2026-12-01'), '失效时间取可用券里最早的那张')
-  assert.ok(!ht.includes('2026-01-01'), '过期券的日期不该被当成「即将失效」')
+  assert.ok(ht.includes(EXP_SOON.slice(0, 10)), '失效时间取可用券里最早的那张')
+  assert.ok(!ht.includes(EXPIRED.slice(0, 10)), '过期券的日期不该被当成「即将失效」')
 })
 
 test('币种符号跟随 overview.currency，不再硬编码 ¥', async () => {

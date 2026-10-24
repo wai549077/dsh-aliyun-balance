@@ -1,13 +1,18 @@
 // 端到端（离线）：假凭据 + 假 BSS 响应，打通 签名 → 取数 → 归一化 → overview 全链路。
 // 这是「配上真 AK 后一定能出数」的离线证据：唯一被替换的是网络层。
-import { test } from 'node:test'
+import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-qb-e2e-'))
+const DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-qb-e2e-'))
+process.env.DSH_HOME = DSH_HOME
+after(() => { try { fs.rmSync(DSH_HOME, { recursive: true, force: true }) } catch { /* 清理失败不影响结论 */ } })
 const { apply, OVERVIEW_PATH, SETTINGS_PATH } = await import('../lib/index.js')
+
+/** 夹具日期相对当前时间：写死未来日期会在那天让测试自己变红 */
+const isoInDays = (n) => new Date(Date.now() + n * 86400000).toISOString()
 
 function fakeCtx() {
   const routes = new Map()
@@ -34,7 +39,7 @@ function stubFetch(seen) {
     if (action === 'QueryAccountBalance') {
       body = { Code: '200', Success: true, Data: { AvailableAmount: '26.72', AvailableCashAmount: '26.72', CreditAmount: '0.00', MybankCreditAmount: '0.00', Currency: 'CNY' } }
     } else if (action === 'QueryCashCoupons') {
-      body = { Code: '200', Success: true, Data: [{ CashCouponId: 1, CashCouponNo: 'Q-a', NominalValue: '300.00', Balance: '300.00', Status: 'Available', EffectiveTime: '2026-09-01T00:00:00Z', ExpiryTime: '2027-09-01T00:00:00Z', ApplicableScenarios: '阿里云按量付费账单' }] }
+      body = { Code: '200', Success: true, Data: [{ CashCouponId: 1, CashCouponNo: 'Q-a', NominalValue: '300.00', Balance: '300.00', Status: 'Available', EffectiveTime: isoInDays(-30), ExpiryTime: isoInDays(300), ApplicableScenarios: '阿里云按量付费账单' }] }
     }
     return { ok: true, status: 200, headers: { get: () => null }, async json() { return body } }
   }

@@ -1,4 +1,4 @@
-import { test } from 'node:test'
+import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -8,7 +8,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 // 必须在 import 之前改 DSH_HOME（paths() 每次调用求值，但保持一致更省心）
 const here = path.dirname(fileURLToPath(import.meta.url))
-process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-qb-'))
+const DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-qb-'))
+process.env.DSH_HOME = DSH_HOME
+after(() => { try { fs.rmSync(DSH_HOME, { recursive: true, force: true }) } catch { /* 清理失败不影响结论 */ } })
 const { apply, OVERVIEW_PATH, SETTINGS_PATH, WIDGET_PATH, loadSettings, saveSettings, DEFAULT_SETTINGS, WRITABLE_SETTINGS_KEYS, paths } = await import('../lib/index.js')
 
 function fakeCtx() {
