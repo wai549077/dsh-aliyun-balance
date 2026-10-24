@@ -293,6 +293,8 @@ dsh plugin add dsh-aliyun-balance
 
 ## 开发
 
+交接与维护说明见 [docs/HANDOFF.md](docs/HANDOFF.md)（当前状态、发版流程、排查入口、已知外部漂移）。
+
 ```bash
 npm test                          # 全量单测（= node --test）
 node test/normalize.test.mjs      # 单跑一个文件
