@@ -19,6 +19,13 @@
   var POLL_MS = 60000
   var UI_ID = 'dsh-aliyun-balance-root'
 
+  /**
+   * 前端包版本 —— 只用于日志自报（`v=`），让「用户说自己是 0.1.3、但渲染进程还缓存着旧
+   * widget.js」这种情况一眼看得出来。**发版时必须和 package.json 一起改**：
+   * 测试里有一条会读 package.json 对账，忘了改会直接变红。
+   */
+  var CLIENT_VERSION = '0.1.4'
+
   // ---------- 小工具 ----------
   /** 券「可用」状态判定。**与宿主页 normalize.js 的 isAvailableStatus 保持一致**（改一处要改两处）。 */
   var AVAILABLE_STATUS = { available: 1, availabletouse: 1 }
@@ -63,28 +70,75 @@
   }
   function errText(e) { return String((e && e.message) || e || '未知错误') }
 
+  /**
+   * 错误码 → 一句能照着做的话。
+   *
+   * 受众是第一次接触云服务的学生：阿里云的 Message 是英文、还常夹整段签名串，
+   * 贴给他们等于没说。所以界面只讲「哪里错了 + 怎么改」，
+   * 原始 message / 请求细节只进日志（见 ~/.dsh/.dsh-aliyun-balance.log），
+   * 他们去问别的 AI 时，AI 读日志就能定位。
+   */
   var CODE_HINTS = {
-    NoCredentials: '还没配置阿里云只读 AccessKey：请在面板里填入 AK / SK',
-    InvalidAccessKeyId: 'AccessKey ID 无效或已被删除，请重新生成',
-    SignatureDoesNotMatch: 'AccessKey Secret 不对（或系统时间偏差过大）',
-    'Forbidden.RAM': '这个 RAM 子账号没有余额与代金券的只读权限：请给它挂 bss:Describe* / bss:Query*',
-    Forbidden: '没有权限：请给 RAM 子账号挂余额与代金券的只读策略',
-    NetworkError: '网络不可用：检查网络/代理后重试',
+    NoCredentials: '还没填 AccessKey：在面板里输入 AK 和 SK，然后点保存',
+    InvalidAccessKeyId: 'AccessKey ID 不存在或已删除：去阿里云控制台重新生成，再完整复制过来',
+    SignatureDoesNotMatch: 'AccessKey Secret 填错了（或电脑时间不准）：重新复制一遍，别多空格；还错就打开系统自动校时',
+    'InvalidTimeStamp.Expired': '电脑时间不准：打开系统的「自动设置时间」，同步后再试',
+    'Forbidden.RAM': '这个 AccessKey 没有读余额的权限：在阿里云 RAM 控制台给它加 AliyunBSSReadOnlyAccess',
+    Forbidden: '这个 AccessKey 没有读余额的权限：在阿里云 RAM 控制台给它加 AliyunBSSReadOnlyAccess',
+    CredWriteFailed: '能连上阿里云，但 DSH 没存下凭据：重启 DSH 后再保存一次',
+    NetworkError: '连不上阿里云：检查网络或代理，然后点一下刷新重试',
+    'Throttling.User': '请求太频繁：等一分钟再点刷新',
+    ServiceUnavailable: '阿里云那边暂时不可用：过一会儿再刷新',
   }
+  /** 没有错误码可翻译时的兜底（网络断了、后台没响应等） */
+  var NO_BACKEND = '插件后台没有响应，重启 DSH 再试'
   function explainError(err) {
-    if (!err) return '未知错误'
-    var code = String(err.code || '')
-    var hint = CODE_HINTS[code] || CODE_HINTS[String(code).split('.')[0]]
-    var msg = String(err.message || '')
-    if (hint) return msg ? hint + '（' + msg + '）' : hint
-    if (code === 'HTTP 403' || code === 'HTTP 401') return '请求被宿主拒绝：刷新页面后重试'
-    return code ? code + (msg ? '：' + msg : '') : (msg || '未知错误')
+    var code = String((err && err.code) || '')
+    var hint = CODE_HINTS[code] || CODE_HINTS[code.split('.')[0]]
+    if (hint) return hint
+    if (code === 'HTTP 403' || code === 'HTTP 401') return 'DSH 拒绝了这次请求：刷新页面，还不行就重启 DSH'
+    // 不认识的错误码也只给中文结论 —— 英文原文在日志里，交给 AI 读
+    if (!code) return '出了点问题，可以让 AI 助手看日志帮你排查'
+    return '出了点问题（错误码 ' + code.slice(0, 40) + '），可以让 AI 助手看日志帮你排查'
+  }
+  /** 捕获到的异常 → 中文提示；带错误码就走翻译表，否则按「后台没响应」算 */
+  function explainThrown(e) {
+    return (e && e.code) ? explainError(e) : NO_BACKEND
+  }
+  /** 分区名翻成中文：面板上不该出现 [balance]/[coupons] 这种开发者词 */
+  var SCOPE_LABELS = { balance: '余额', coupons: '代金券', credentials: '凭据', overview: '总览' }
+  function scopeLabel(sc) {
+    return String(sc || '').split('+').map(function (s) {
+      return SCOPE_LABELS[s] || s
+    }).join('+')
+  }
+  /**
+   * 同一条报错会同时挂在 balance / coupons 两个分区上（同一次 AK 错误各报一遍）。
+   * 按最终文本去重，分区合并成 [balance+coupons]，面板不再连贴三份同样的字。
+   */
+  function errorNotes(list) {
+    var order = []
+    var byText = {}
+    ;(Array.isArray(list) ? list : []).forEach(function (e) {
+      var text = explainError(e)
+      if (!text) return
+      if (!byText[text]) { byText[text] = []; order.push(text) }
+      var sc = String((e && e.scope) || '')
+      if (sc && byText[text].indexOf(sc) < 0) byText[text].push(sc)
+    })
+    return order.map(function (text) { return { text: text, scope: byText[text].join('+') } })
   }
 
   // ---------- 自报（让宿主日志能看到前端跑到哪一步）----------
   function ping(stage, err, data) {
     try {
       var msg = err ? errText(err) : (data != null ? String(data) : '')
+      // 归属标记：官方 DSH 与 Desktop 共写同一个日志文件，没有它分不清是谁、什么版本、
+      // 挡墙多高。`tb` = 生效的顶部挡墙高度（Desktop 0 / 官方 40）。
+      // 先截原消息再拼标记，保证标记不会被服务端 800 字符上限切掉。
+      var tag = 'client=' + (ChipCore.hostTag || 'unknown') +
+        ';tb=' + (ChipCore.topLimit || 0) + ';v=' + CLIENT_VERSION
+      msg = msg ? (msg.slice(0, 700) + ' ' + tag) : tag
       var q = OVERVIEW_URL + '?client=1&stage=' + encodeURIComponent(stage)
       if (msg) q += '&msg=' + encodeURIComponent(msg.slice(0, 800))
       fetch(q, { cache: 'no-store' }).catch(function () {})
@@ -672,8 +726,8 @@
     })
     box.appendChild(rows)
 
-    d.errors.forEach(function (e) {
-      box.appendChild(h('div', { color: T.err, fontSize: '11px', marginTop: '4px' }, explainError(e)))
+    errorNotes(d.errors).forEach(function (n) {
+      box.appendChild(h('div', { color: T.err, fontSize: '11px', marginTop: '4px' }, n.text))
     })
     // 底部的操作提示行（「单击刷新｜按住拖动…｜双击复位｜点菜单看明细」）已按用户要求删除：
     // 卡片纯看信息，操作不需要念一遍 —— 提示靠菜单按钮的「菜单」气泡和悬停明细本身。
@@ -773,6 +827,12 @@
      * 它们在「y < 顶栏高度」的右侧）：那是 Windows 画的非客户区，点下去会直接关窗口。
      */
     topLimit: 0,
+
+    /**
+     * 宿主标记：'official' / 'desktop' / 空串（还没探测）。
+     * 只用于日志归属 —— 两个客户端共写一个日志文件，ping() 会把它拼进每条消息。
+     */
+    hostTag: '',
 
     /**
      * 探测顶部挡墙高度：**只有官方 DSH 有墙**（Desktop 返回 0，位置行为与 GitHub 版一致）。
@@ -1884,7 +1944,9 @@
     // 错误行：拉取失败必须当场露出来 —— 修凭据时得看到报错。
     var notes = h('div', { marginTop: '2px' }, null)
     if (S.error) notes.appendChild(note('拉取失败：' + S.error, T.err))
-    d.errors.forEach(function (e) { notes.appendChild(note('[' + (e.scope || '') + '] ' + explainError(e), T.err)) })
+    errorNotes(d.errors).forEach(function (n) {
+      notes.appendChild(note((n.scope ? '[' + scopeLabel(n.scope) + '] ' : '') + n.text, T.err))
+    })
     p.appendChild(notes)
 
     // 凭据区摘要 —— 菜单里唯一的分区（用户拍板：菜单只管设置，信息看悬停卡片）
@@ -2084,7 +2146,12 @@
         return res.json()
       })
       .then(function (json) { S.payload = json; S.error = null; return json })
-      .catch(function (e) { S.error = errText(e); return S.payload })
+      .catch(function (e) {
+        // 界面上只留一句中文；原始异常进日志，AI 读日志能看出是超时、403 还是别的
+        ping('load-fail', e)
+        S.error = NO_BACKEND
+        return S.payload
+      })
       .then(function (json) {
         inflight = null
         S.loading = false
@@ -2112,8 +2179,17 @@
       body: JSON.stringify(patch || {}),
     }).then(function (r) {
       return r.json().catch(function () { return null }).then(function (j) {
-        if (!r || r.ok === false) throw new Error((j && j.error) || ('HTTP ' + (r && r.status)))
-        if (j && j.ok === false) throw new Error((j && j.error) || '写入失败')
+        // 把宿主的 error 带到异常上：界面才能按错误码翻译成中文（原文仍然只进日志）
+        if (!r || r.ok === false) {
+          var e1 = new Error('HTTP ' + (r && r.status))
+          e1.code = 'HTTP ' + (r && r.status)
+          throw e1
+        }
+        if (j && j.ok === false) {
+          var e2 = new Error(j.message || j.error || '写入失败')
+          e2.code = j.error || ''
+          throw e2
+        }
         return j
       })
     })
@@ -2138,7 +2214,9 @@
         // 只校验这次**真的提交过**的那一侧，避免只填 SK 时误报。
         var st = (j && j.settings) || {}
         if ((patch.ak && !st.hasAk) || (patch.sk && !st.hasSk)) {
-          throw new Error('写入后读回为空，凭据多半没保存成功（见 ~/.dsh/.dsh-aliyun-balance.log 的 cred-write-fail）')
+          var eRead = new Error('写入后读回为空，凭据多半没保存成功（见 ~/.dsh/.dsh-aliyun-balance.log 的 cred-write-fail）')
+          eRead.code = 'CredWriteFailed' // 走翻译表，界面只说人话；细节留在上面这句（进日志）
+          throw eRead
         }
         S.ak = ''
         S.sk = ''
@@ -2147,7 +2225,10 @@
         return load(true)
       })
       .then(function () { S.message = { text: '已保存并刷新完成', tone: T.ok } })
-      .catch(function (e) { S.message = { text: '保存失败：' + errText(e), tone: T.err } })
+      .catch(function (e) {
+        ping('save-fail', e) // 原文（如宿主写盘失败细节）进日志
+        S.message = { text: '保存失败：' + explainThrown(e), tone: T.err }
+      })
       .then(function () { S.busy = ''; render() })
   }
 
@@ -2194,7 +2275,12 @@
         if (!json || !json.balance) { S.message = { text: '连接正常，但没返回余额字段（检查 RAM 权限）', tone: T.warn }; return }
         S.message = { text: '连接正常：可用额度 ' + money(json.balance.available) + '（' + fmtTime(json.dataAsOf && json.dataAsOf.balance) + '）', tone: T.ok }
       })
-      .catch(function (e) { S.message = { text: '测试连接失败：' + errText(e), tone: T.err } })
+      // 宿主会把阿里云的原文（SignatureDoesNotMatch 时是整段 CanonicalRequest）透传到这里。
+      // 界面按错误码翻译成中文；原文用 ping 写进日志，留给 AI 排查。
+      .catch(function (e) {
+        ping('test-fail', e)
+        S.message = { text: '测试连接失败：' + explainThrown(e), tone: T.err }
+      })
       .then(function () { S.busy = ''; render() })
   }
 
@@ -2210,7 +2296,8 @@
       S.busy = ''
       render()
     }).catch(function (e) {
-      S.message = { text: '刷新失败：' + errText(e), tone: T.err }
+      ping('manual-fail', e)
+      S.message = { text: '刷新失败：' + explainThrown(e), tone: T.err }
       S.busy = ''
       render()
     })
@@ -2221,7 +2308,10 @@
   // 暴露给页面上任何脚本。需要调试时先 `window.__DSHAB_DEBUG__ = true` 再刷新页面。
   try {
     if (typeof window !== 'undefined' && window.__DSHAB_DEBUG__ === true) {
-      window.__DSHAB__ = { S: S, el: el, derive: derive, render: render, build: build, chipCore: ChipCore, applyPosition: applyPosition }
+      window.__DSHAB__ = {
+        S: S, el: el, derive: derive, render: render, build: build, chipCore: ChipCore,
+        applyPosition: applyPosition, explainError: explainError, errorNotes: errorNotes,
+      }
     }
   } catch (e) { /* 忽略 */ }
 
@@ -2233,6 +2323,13 @@
       // 顶部挡墙：只有官方 DSH 需要（它的 drag 带在本文档里、盖不住挂件）。
       // Desktop 探测结果是 0 —— 位置行为与 GitHub 版完全一致。
       ChipCore.topLimit = ChipCore.detectTopLimit(document)
+      ChipCore.hostTag = ChipCore.topLimit > 0 ? 'official' : 'desktop'
+      // 启动留一条宿主快照：日志共写时先看这一条，不用再猜是哪边、挡墙多高、视口多大。
+      // （ping() 会自动补 client/tb/v，这里只记探测结果与视口。）
+      ping('host', null, 'detect=' + ChipCore.topLimit +
+        ';vw=' + ((typeof window !== 'undefined' && window.innerWidth) || 0) +
+        ';vh=' + ((typeof window !== 'undefined' && window.innerHeight) || 0) +
+        ';dpr=' + ((typeof window !== 'undefined' && window.devicePixelRatio) || 1))
       build()
       applyPosition()
       render()

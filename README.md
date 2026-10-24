@@ -225,13 +225,49 @@ dsh plugin add dsh-aliyun-balance
 
 ## 故障排查
 
+界面上的报错只给中文结论（哪里错、怎么改）；阿里云的英文原文与请求细节只写进日志 ——
+截图看不懂时，把日志发给 AI 就能定位。
+
 | 现象 | 处理 |
 |---|---|
 | 装完没出现那一行 | 重开一次客户端；看 `%USERPROFILE%\.dsh\.dsh-aliyun-balance.log` 有无 `{"event":"apply"}` |
 | 「未配置凭据」 | 配只读 AK；面板里「测试连接」验证 |
 | 查余额报 Forbidden | RAM 子账号缺 `bss:Describe*` / `bss:Query*` 只读权限 |
+| 报错看不懂 | 按面板上的错误码看下表的日志事件，或把日志发给 AI |
 | 挂件位置乱了 | 双击那一行复位；若勾了「锁定位置」先取消锁定 |
-| 想看前端跑到哪一步 | `~/.dsh/.dsh-aliyun-balance.log` 的 `client-ping`（`positioned` / `tokens` 等阶段） |
+| 想看前端跑到哪一步 | 看日志里的 `client-ping`（`stage` 见下表） |
+
+**日志事件**（`%USERPROFILE%\.dsh\.dsh-aliyun-balance.log`，200 行环形缓冲）
+
+| event | 什么时候出现 | 关键字段 |
+|---|---|---|
+| `apply` | 插件加载 | `profile` / `endpoint` / `seq` |
+| `overview` | 每次取数（30s 节流） | `ok` / `stale` / `errors[]`（`scope:code`） |
+| `refresh-fail` | 某个分区取数失败 | `scope` / `code` / `message`（原文前 200 字） |
+| `cred-write-fail` | 凭据写盘失败 | `ref` / `code` / `message` |
+| `resolve-miss` | 读不到已存凭据 | `reason`（`no-service` / `empty` / `throw` 等） / `akRef` |
+| `client-ping` | 前端自报，按 `stage` 区分（见下） | `stage` / `msg`（原文前 800 字，带 `client` / `tb` / `v` 归属标记） |
+
+**`client-ping` 的 stage**
+
+| stage | 含义 |
+|---|---|
+| `host` | 启动快照：`detect`（顶部挡墙高度）/ `vw` / `vh` / `dpr`；Desktop 为 0，官方 DSH 为 40 |
+| `apply` / `booted` / `dom-ready` | 启动各阶段，确认脚本装上了 |
+| `load-fail` | 拉取 `overview.json` 失败（超时、HTTP 状态等原始异常） |
+| `test-fail` | 「测试连接」失败：阿里云原始 `message`（`SignatureDoesNotMatch` 时含完整签名串） |
+| `save-fail` | 保存凭据失败：宿主写盘/校验失败的原文 |
+| `manual-fail` | 点那一行强制刷新失败 |
+| `top-wall` | 存档位置被顶部挡墙抬高（`from` / `to` / `vh`） |
+| `positioned` / `positioned2` / `self-heal` | 定位结果与自愈（`mode` / `was`） |
+| `tokens` | 主题令牌探针（排查配色/透明度异常） |
+| `drag-stale` | 指针被窗口拖拽抢走后强制收尾 |
+| `error` | 启动期未捕获异常 |
+
+**给 AI 的一句话**
+
+> 读 `C:\Users\<用户名>\.dsh\.dsh-aliyun-balance.log`，看最近一条 `refresh-fail` 或
+> `client-ping` 里 `stage=test-fail` 的 `code` / `message`，判断是凭据、权限、网络还是系统时间问题。
 
 ---
 

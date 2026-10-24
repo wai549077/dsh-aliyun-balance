@@ -385,6 +385,41 @@ test('官方 DSH 顶部挡墙：往上拖被标题栏那一栏挡住；Desktop �
   assert.equal(env5.win.__DSHAB__.el.root.style.top, '0px', 'Desktop 的 y=0 存档原样恢复（GitHub 版行为）')
 })
 
+test('日志归属：每条自报都带 client/tb/v；启动另有一条宿主快照；版本与 package.json 对账', async () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(here, '../package.json'), 'utf8'))
+  const m = /var CLIENT_VERSION = '([^']+)'/.exec(WIDGET_SRC)
+  assert.ok(m, 'widget.js 里应有 CLIENT_VERSION')
+  assert.equal(m[1], pkg.version, 'CLIENT_VERSION 必须与 package.json 一致（发版时两处一起改）')
+  const ver = pkg.version
+
+  const stageOf = (u) => { const r = /[?&]stage=([^&]*)/.exec(String(u)); return r ? decodeURIComponent(r[1]) : '' }
+  const msgOf = (u) => { const r = /[?&]msg=([^&]*)/.exec(String(u)); return r ? decodeURIComponent(r[1]) : '' }
+  const pingsOf = (env) => env.fetches.map((f) => String(f.u)).filter((u) => u.includes('client=1'))
+
+  // Desktop（默认桩）：client=desktop;tb=0
+  const env = makeEnv()
+  await flush()
+  const deskPings = pingsOf(env)
+  assert.ok(deskPings.length > 0, '应有自报')
+  const deskReady = deskPings.find((u) => stageOf(u) === 'dom-ready')
+  assert.ok(deskReady, '应有 dom-ready 自报')
+  assert.ok(msgOf(deskReady).includes('client=desktop;tb=0;v=' + ver), 'Desktop 归属标记')
+  const deskHost = deskPings.find((u) => stageOf(u) === 'host')
+  assert.ok(deskHost, '启动应有一条宿主快照')
+  assert.ok(msgOf(deskHost).includes('detect=0'), 'Desktop 挡墙探测为 0')
+
+  // 官方 DSH：client=official;tb=40
+  const env2 = makeEnv([], null, officialSetup)
+  await flush()
+  const offPings = pingsOf(env2)
+  const offHost = offPings.find((u) => stageOf(u) === 'host')
+  assert.ok(offHost, '官方也应有宿主快照')
+  assert.ok(msgOf(offHost).includes('client=official;tb=40;v=' + ver), '官方归属标记')
+  assert.ok(msgOf(offHost).includes('detect=40'), '官方挡墙探测为 40')
+  const offReady = offPings.find((u) => stageOf(u) === 'dom-ready')
+  assert.ok(msgOf(offReady).includes('client=official;tb=40'), '后续自报同样带标记')
+})
+
 test('属性测试：clampSafe 对任意输入都不越界、不穿墙、不产生 NaN（2000 组）', async () => {
   const env = makeEnv()
   const cores = [env.win.__DSHAB__.chipCore]
@@ -2077,4 +2112,109 @@ test('浮层的高度只声明一次：悬停卡片与面板都不得有描边�
   const st = env.dom.body.children.find((n) => n.id === 'dshab-style')
   assert.match(st.textContent, /\.dshab-hover,\.dshab-panel\{[^}]*border:0\s*!important/,
     '兜底规则要把描边钉死为 0')
+})
+
+// ---- 错误文本的呈现（2026-10-24 用户报：输错 AK 后面板被报错撑成一面墙）----
+// 阿里云的 SignatureDoesNotMatch 把整段 StringToSign + CanonicalRequest 塞进 Message
+// （多行、全量 x-acs-* 头、几千字符）。我们原本原样拼在提示后面 → 260px 卡片装不下。
+const hugeSignatureMsg = [
+  'Specified signature does not match our calculation. server stringToSign is [ACS3-HMAC-SHA256',
+  'e80ee1f6b6f5342610ded432e80d01d1321162842e1fa6bees3'.repeat(4),
+  'server CanonicalRequest is [POST / x-acs-action:QueryAccountBalance',
+  'x-acs-content-sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41].',
+].join('\n')
+
+test('错误文本：整段 CanonicalRequest 只留开头那句人话，不把卡片撑成一面墙', async () => {
+  const env = makeEnv([
+    { match: '/dsh-aliyun-balance/overview.json', payload: OVERVIEW_OK },
+    { match: '/dsh-aliyun-balance/settings.json', payload: SETTINGS_OK() },
+  ])
+  await flush()
+  const api = env.win.__DSHAB__
+
+  const line = api.explainError({ scope: 'balance', code: 'SignatureDoesNotMatch', message: hugeSignatureMsg })
+  assert.match(line, /^AccessKey Secret 填错了/, '要给出小白能照做的中文结论')
+  assert.ok(!line.includes('\n'), '不得出现多行原文')
+  assert.ok(!line.includes('CanonicalRequest'), '整段请求不该出现在卡片上')
+  assert.ok(!line.includes('Specified signature'), '英文原文不该出现在界面上')
+  assert.ok(line.length <= 130, '错误行要短（实际 ' + line.length + ' 字符）：' + line)
+
+  // 认识的错误码：同样不贴英文原文
+  const badId = api.explainError({ code: 'InvalidAccessKeyId.NotFound', message: 'Specified access key is not found or invalid.' })
+  assert.match(badId, /重新生成/, '要告诉用户怎么修')
+  assert.ok(!badId.includes('Specified'), '英文原文不该出现在界面上')
+
+  // 不认识的错误码：中文结论 + 错误码 + 指向日志/AI，仍然不贴英文原文
+  const unknown = api.explainError({ code: 'WeirdError.X', message: 'x'.repeat(3000) })
+  assert.ok(unknown.includes('WeirdError.X'), '错误码要留着，便于 AI 定位')
+  assert.ok(unknown.includes('AI'), '要告诉用户可以找 AI 看日志')
+  assert.ok(!unknown.includes('xxx'), '超长原文不得上界面')
+  assert.ok(unknown.length <= 80, '未知错误也要短（实际 ' + unknown.length + '）')
+
+  // 连错误码都没有（网络断了等）：也只给中文兜底
+  const bare = api.explainError({ message: 'Failed to fetch' })
+  assert.ok(bare.includes('AI'))
+  assert.ok(!bare.includes('fetch'), '不得把 fetch 的英文原文贴出来')
+})
+
+test('错误行去重：同一份 AK 报错同时挂在 balance/coupons 上，面板只贴一行并合并分区', async () => {
+  const bad = {
+    ...OVERVIEW_OK, ok: false, balance: null, coupons: null,
+    errors: [
+      { scope: 'balance', code: 'SignatureDoesNotMatch', message: hugeSignatureMsg },
+      { scope: 'coupons', code: 'SignatureDoesNotMatch', message: hugeSignatureMsg },
+    ],
+  }
+  const env = makeEnv([
+    { match: '/dsh-aliyun-balance/overview.json', payload: bad },
+    { match: '/dsh-aliyun-balance/settings.json', payload: SETTINGS_OK() },
+  ])
+  await flush()
+  const api = env.win.__DSHAB__
+
+  const notes = api.errorNotes(bad.errors)
+  assert.equal(notes.length, 1, '同文同因只留一条')
+  assert.equal(notes[0].scope, 'balance+coupons', '分区要合并标明')
+
+  api.S.open = true
+  api.render()
+  const shown = textOf(api.el.panel)
+  const hits = shown.split('AccessKey Secret 填错了').length - 1
+  assert.equal(hits, 1, '面板里这段报错只能出现一次（实际 ' + hits + ' 次）')
+  assert.ok(shown.includes('[余额+代金券]'), '分区名要翻成中文，不能出现 [balance]')
+  assert.ok(!shown.includes('balance]'), '开发者词不该露给用户')
+})
+
+test('测试连接失败：宿主透传整段 CanonicalRequest 时，提示也只显示短句', async () => {
+  // 宿主 test 分支原样回传阿里云的 message（见 lib/index.js 的 send({ ok:false, message: r.message })），
+  // 前端原来把它直接拼进提示 —— 和错误行是同一种「一面墙」。
+  const env = makeEnv([
+    { match: '/dsh-aliyun-balance/settings.json', method: 'PUT', payload: { ok: false, error: 'SignatureDoesNotMatch', message: hugeSignatureMsg, saved: false } },
+    { match: '/dsh-aliyun-balance/overview.json', payload: OVERVIEW_OK },
+    { match: '/dsh-aliyun-balance/settings.json', payload: SETTINGS_OK() },
+  ])
+  await flush()
+  const api = env.win.__DSHAB__
+  api.S.open = true
+  api.render()
+
+  const ak = findAll(api.el.panel, (n) => n.tag === 'input' && n.type === 'password')[0]
+  ak.value = 'AK-WRONG'
+  ak.dispatch('input', {})
+  findByText(api.el.panel, 'button', '测试连接')[0].dispatch('click', { stopPropagation() {} })
+  await flush()
+
+  const msg = (api.S.message && api.S.message.text) || ''
+  assert.match(msg, /^测试连接失败/, '提示语义不变')
+  assert.match(msg, /AccessKey Secret 填错了/, '按错误码翻成中文结论')
+  assert.ok(!msg.includes('CanonicalRequest'), '整段请求不该出现在提示里')
+  assert.ok(!msg.includes('\n'), '不得把多行原文原样贴出来')
+  assert.ok(msg.length <= 140, '提示要短（实际 ' + msg.length + ' 字符）：' + msg)
+
+  // 原文不能被丢掉：它要进日志，用户拿去问别的 AI 时，AI 读日志才能定位
+  const pings = env.fetches.filter((f) => f.u.includes('stage=test-fail'))
+  assert.equal(pings.length, 1, '测试连接失败要留一条日志')
+  const logged = decodeURIComponent((/[?&]msg=([^&]*)/.exec(pings[0].u) || [])[1] || '')
+  assert.ok(logged.includes('Specified signature'), '日志里要保留阿里云的原文开头')
+  assert.ok(logged.includes('CanonicalRequest'), '日志里要保留完整的诊断信息')
 })
