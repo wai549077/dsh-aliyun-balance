@@ -24,7 +24,7 @@
    * widget.js」这种情况一眼看得出来。**发版时必须和 package.json 一起改**：
    * 测试里有一条会读 package.json 对账，忘了改会直接变红。
    */
-  var CLIENT_VERSION = '0.1.4'
+  var CLIENT_VERSION = '0.1.5'
 
   // ---------- 小工具 ----------
   /** 券「可用」状态判定。**与宿主页 normalize.js 的 isAvailableStatus 保持一致**（改一处要改两处）。 */
@@ -242,10 +242,41 @@
     return DOCK_ENABLED
   }
 
+  /** 一列券的余额合计（口径兜底用：宿主没给分组聚合时按 items 自己加） */
+  function sumBalance(list) {
+    var s = 0
+    for (var i = 0; i < (list || []).length; i++) s += Number(list[i] && list[i].balance) || 0
+    return s.toFixed(2)
+  }
+
+  /**
+   * 当前口径下的券余额（v0.1.5）。
+   *
+   * 口径由 derive() 判定好写在 d.couponScope 上，这里只负责取数：
+   * - 'university'：优先用宿主算好的 universityAvailableBalance（以分累加，精确）；
+   *   宿主没给（旧版 overview 或字段非法）就按 scopedCoupons 自己加，宁可兜底也不显示 ¥—。
+   * - 'all'：用 availableBalance，与 0.1.4 完全一致。
+   * 两侧都取不到才返回 null（→ 界面显示 ¥—，不假装是 0）。
+   */
+  function scopedCouponBalance(d) {
+    var c = d && d.coupons
+    if (!c) return null
+    if (d.couponScope === 'university') {
+      var u = c.universityAvailableBalance
+      if (u !== undefined && u !== null && isFinite(Number(u))) return Number(u).toFixed(2)
+      return sumBalance(d.scopedCoupons)
+    }
+    if (c.availableBalance === undefined || c.availableBalance === null) return null
+    var n = Number(c.availableBalance)
+    return isFinite(n) ? n.toFixed(2) : null
+  }
+
   function derive(p) {
     var d = {
       kind: 'loading', stale: false, currency: 'CNY',
       availableCoupons: [], allCoupons: [],
+      universityCoupons: [],
+      couponScope: 'all', scopedCoupons: [], excludedCoupons: [], scopedCouponBalance: null,
       errors: [], dataAsOf: {},
     }
     if (!p || p.loading === true) return d
@@ -264,6 +295,22 @@
     d.availableCoupons = items.filter(function (it) { return isAvailableStatus(it && it.status) })
     d.errors = Array.isArray(p.errors) ? p.errors.filter(Boolean) : []
 
+    // ---- 券口径（v0.1.5）----
+    // 只按宿主给的 program 标记分组，关键词匹配**不在前端重做**（避免第二份判据漂移）。
+    var uni = d.availableCoupons.filter(function (it) { return (it && it.program) === 'university' })
+    d.universityCoupons = uni
+    // 口径三条规则：
+    // ① 用户关掉开关 → all；
+    // ② 账户里**没有**任何高校计划券 → 回落 all（没领学生券的人不该看到合计变 0 / 变少）；
+    // ③ 否则 → university。
+    var wantUni = !prefs || prefs.studentOnly !== false
+    d.couponScope = (wantUni && uni.length) ? 'university' : 'all'
+    d.scopedCoupons = d.couponScope === 'university' ? uni : d.availableCoupons
+    d.excludedCoupons = d.couponScope === 'university'
+      ? d.availableCoupons.filter(function (it) { return (it && it.program) !== 'university' })
+      : []
+    d.scopedCouponBalance = scopedCouponBalance(d)
+
     var credErr = d.errors.some(function (e) { return String(e.scope) === 'credentials' })
     if (credErr) d.kind = 'no-credentials'
     else if (d.stale) d.kind = 'stale'
@@ -274,15 +321,16 @@
   }
 
   /**
-   * 可用合计 = 代金券余额 + 阿里云账户余额。
+   * 可用合计 = 当前口径的券余额 + 阿里云账户余额。
    * 受众问的是「我还能花多少」：券会被抵扣掉、阿里云余额也能花，两个加起来才是真正的可用总额。
+   * 券一侧的口径见 derive()：默认只算高校计划券（可被面板开关切回全量）。
    * 任一侧有数据就参与合计；两侧都拿不到才返回 null（显示 ¥—）。
    */
   function totalAvailable(d) {
-    var hasC = !!(d.coupons && d.coupons.availableBalance !== undefined && d.coupons.availableBalance !== null)
+    var hasC = d.scopedCouponBalance !== undefined && d.scopedCouponBalance !== null
     var hasB = !!(d.balance && d.balance.available !== undefined && d.balance.available !== null)
     if (!hasC && !hasB) return null
-    var c = hasC ? Number(d.coupons.availableBalance) : 0
+    var c = hasC ? Number(d.scopedCouponBalance) : 0
     var b = hasB ? Number(d.balance.available) : 0
     if (!isFinite(c)) c = 0
     if (!isFinite(b)) b = 0
@@ -374,9 +422,11 @@
     prefs.hideBorder = preset.hideBorder
   }
   function defaultPrefs() {
-    // showPeak 是**显示项**不是外观项 —— 与 locked 同理，不进 PREFS_DEFAULT/applyPreset，
-    // 两个预设按钮都不该顺手改它。
-    return { locked: false, bg: PREFS_DEFAULT.bg, text: PREFS_DEFAULT.text, opacity: PREFS_DEFAULT.opacity, hideBorder: PREFS_DEFAULT.hideBorder, showPeak: true }
+    // showPeak / studentOnly 都是**显示项**不是外观项 —— 与 locked 同理，不进
+    // PREFS_DEFAULT/applyPreset，两个预设按钮都不该顺手改它们。
+    // studentOnly（v0.1.5）：只看高校计划（云工开物）券。默认开 —— 受众就是盯着学生券余额的人，
+    // 而平台满减券要满额消费才用得上，混进「可用合计」只会把数字撑虚。
+    return { locked: false, bg: PREFS_DEFAULT.bg, text: PREFS_DEFAULT.text, opacity: PREFS_DEFAULT.opacity, hideBorder: PREFS_DEFAULT.hideBorder, showPeak: true, studentOnly: true }
   }
   /** 当前外观是否就是出厂那套（分区摘要用）：默认外观 / 已自定义 */
   function prefsPreset() {
@@ -404,6 +454,7 @@
         if (typeof o.text === 'string') prefs.text = o.text
         if (typeof o.hideBorder === 'boolean') prefs.hideBorder = o.hideBorder
         if (typeof o.showPeak === 'boolean') prefs.showPeak = o.showPeak
+        if (typeof o.studentOnly === 'boolean') prefs.studentOnly = o.studentOnly
         if (typeof o.opacity === 'number' && isFinite(o.opacity)) {
           prefs.opacity = Math.max(0, Math.min(100, Math.round(o.opacity)))
         }
@@ -658,21 +709,28 @@
       L.push(['现金 / 信控', money(d.balance.cash) + ' / ' + money(d.balance.credit)])
     }
     var face = 0
-    // 可用券里最早失效的那张（ISO 串同格式，可直接字典序比大小）
+    // 可用券里最早失效的那张（ISO 串同格式，可直接字典序比大小）。
+    // ⚠️ 面值/已用/失效时间必须和主数**同口径**（走 scopedCoupons）—— 否则又会出现
+    // 0.1.4 修过的「卡片自相矛盾」：头部只算学生券、下文明细却把满减券一起算进去。
     var exp = null
-    d.availableCoupons.forEach(function (it) {
+    d.scopedCoupons.forEach(function (it) {
       face += Number(it.nominalValue) || 0
       var s = String((it && it.expiryTime) || '')
       if (s && (!exp || s < exp)) exp = s
     })
-    var balN = Number(d.coupons && d.coupons.availableBalance) || 0
+    var balN = Number(d.scopedCouponBalance) || 0
     if (face > 0) {
       // 「剩 N%」已按用户反馈去掉（面板进度条仍保留这个口径），换成下一行的失效时间
-      L.push(['券面值 / 已用', money(face.toFixed(2)) + ' / ' +
-        money(Math.max(0, face - balN).toFixed(2))])
+      L.push([d.couponScope === 'university' ? '高校券面值 / 已用' : '券面值 / 已用',
+        money(face.toFixed(2)) + ' / ' + money(Math.max(0, face - balN).toFixed(2))])
     }
     if (exp) {
       L.push(['券失效时间', exp.slice(0, 10)])
+    }
+    // 被排除的券必须自己露出来（透明原则）：只算学生券时，满减券不能消失得无声无息，
+    // 否则用户会以为插件漏了券。只在确实有被排除的券时出现这一行。
+    if (d.couponScope === 'university' && d.excludedCoupons.length) {
+      L.push(['其它券（未计入）', money(sumBalance(d.excludedCoupons)) + ' · ' + d.excludedCoupons.length + ' 张'])
     }
     // 这一区的每一行都能从阿里云 BSS 直接读到，没有一个是推算出来的。
     // 计价时段：受「显示项 → 计价时段」开关控制（默认开）。用户在面板里关掉就不显示。
@@ -698,7 +756,9 @@
     if (!box) return
     box.textContent = ''
     var head = h('div', { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '10px' }, null)
-    head.appendChild(h('span', { color: T.text2, fontSize: '11px' }, '可用合计（券 + 阿里云余额）'))
+    // 口径写进标题：只算学生券时，读者得一眼知道这个数**不含**满减券
+    head.appendChild(h('span', { color: T.text2, fontSize: '11px' },
+      d.couponScope === 'university' ? '可用合计（高校券 + 阿里云余额）' : '可用合计（券 + 阿里云余额）'))
     box.appendChild(head)
 
     box.appendChild(h('div', {
@@ -708,8 +768,8 @@
 
     // 构成：两个来源各半句，任一侧没数就不硬凑
     var parts = []
-    if (d.coupons && d.coupons.availableBalance !== undefined && d.coupons.availableBalance !== null) {
-      parts.push('券 ' + money(d.coupons.availableBalance))
+    if (d.scopedCouponBalance !== undefined && d.scopedCouponBalance !== null) {
+      parts.push((d.couponScope === 'university' ? '高校券 ' : '券 ') + money(d.scopedCouponBalance))
     }
     if (d.balance && d.balance.available !== undefined && d.balance.available !== null) {
       parts.push('阿里云余额 ' + money(d.balance.available))
@@ -2105,25 +2165,57 @@
     return pSec.wrap
   }
 
-  /** 显示项入口行：目前只有「计价时段」开关（默认开，展开体写适用范围） */
+  /**
+   * 显示项入口行：管「看什么数据」的开关（v0.1.5 起两项：只看高校券、计价时段）。
+   *
+   * 为什么单独一个分区：这些开关管的是「看什么数据」，与「凭据」「外观」都不是一类。
+   * 入口行上只留**最常动**的那一个（只看高校券），其余放展开体 —— 入口行的位置就那么点，
+   * 而且这两个开关是互斥的关注点（口径 vs 明细行）。
+   */
   function panelDisplaySection() {
-    // ── 显示项：控制悬停明细里显示哪些行 ──
-    // 为什么单独一个分区：这些开关管的是「看什么数据」，与「凭据」「外观」都不是一类。
-    // 目前只有一项，但这是它该待的地方（以后加「显示数据时间」「显示构成明细」都往这儿放）。
     var pwNow = ChipCore.peakWindow(Date.now())
-    var sumPeak = prefs.showPeak === false
-      ? '已隐藏'
+    var peakTxt = prefs.showPeak === false
+      ? '时段已隐藏'
       : ((pwNow.offPeak ? '闲时（便宜）' : '忙时（较贵）') + ' · ' +
          ChipCore.fmtDur(pwNow.minsLeft) + '后' + (pwNow.offPeak ? '转忙' : '转闲'))
-    var dSec = section('display', '计价时段', sumPeak, {
+    // 摘要两段：当前口径 + 当前时段 —— 不展开也能看出「这个数是按什么算的」
+    var sumScope = prefs.studentOnly !== false ? '只看高校券' : '全部券'
+    var dSec = section('display', '显示项', sumScope + ' · ' + peakTxt, {
       checkbox: {
-        checked: prefs.showPeak !== false,
-        title: '在悬停明细里显示「计价时段」',
-        onChange: function (on) { prefs.showPeak = on; savePrefs(); render() },
+        checked: prefs.studentOnly !== false,
+        title: '只统计高校计划（云工开物）券',
+        onChange: function (on) { prefs.studentOnly = on; savePrefs(); render() },
       },
     })
+
+    /** 展开体里的一行开关（入口行只有一个 checkbox，其余都走这里） */
+    function checkRow(label, checked, title, onChange) {
+      var row = h('div', { display: 'flex', alignItems: 'center', gap: '8px', margin: '6px 0' }, null)
+      var ck = h('input', { flex: '0 0 auto', margin: '0', cursor: 'pointer' }, null)
+      ck.type = 'checkbox'
+      ck.className = 'dshab-check'
+      ck.checked = checked === true
+      ck.title = title || label
+      ck.setAttribute('aria-label', title || label)
+      ck.addEventListener('change', function () { onChange(ck.checked === true) })
+      row.appendChild(ck)
+      row.appendChild(h('span', { color: T.text2, fontSize: '12px' }, label))
+      return row
+    }
+
+    dSec.body.appendChild(note(
+      '只看高校券：按券备注里的「云工开物 / 高校用云支持计划」识别，其它券（满减券等）不计入合计，' +
+      '但仍会列在悬停明细的「其它券（未计入）」里。', T.text3))
+    dSec.body.appendChild(note(
+      '账户里没有高校计划券时自动按全部券统计，合计不会突然变少。', T.text3))
+
+    dSec.body.appendChild(checkRow(
+      '在悬停明细里显示「计价时段」',
+      prefs.showPeak !== false,
+      '在悬停明细里显示「计价时段」',
+      function (on) { prefs.showPeak = on; savePrefs(); render() }))
     dSec.body.appendChild(note('关闭后，悬停明细里不再出现「计价时段」那一行。', T.text3))
-    // 这段说明是这次加开关的**主要理由**：那条时段只对 3 / 20 个平台模型成立，
+    // 这段说明是加时段开关的**主要理由**：那条时段只对 3 / 20 个平台模型成立，
     // 而插件不知道你在用哪个模型（v0.2.0 起不订阅任何会话事件），所以只能把适用范围
     // 讲清楚、把开不开交给用户。
     dSec.body.appendChild(note(

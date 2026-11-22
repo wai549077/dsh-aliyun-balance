@@ -39,7 +39,22 @@ function stubFetch(seen) {
     if (action === 'QueryAccountBalance') {
       body = { Code: '200', Success: true, Data: { AvailableAmount: '26.72', AvailableCashAmount: '26.72', CreditAmount: '0.00', MybankCreditAmount: '0.00', Currency: 'CNY' } }
     } else if (action === 'QueryCashCoupons') {
-      body = { Code: '200', Success: true, Data: [{ CashCouponId: 1, CashCouponNo: 'Q-a', NominalValue: '300.00', Balance: '300.00', Status: 'Available', EffectiveTime: isoInDays(-30), ExpiryTime: isoInDays(300), ApplicableScenarios: '阿里云按量付费账单' }] }
+      // 两张券：一张高校计划学生券（备注带「云工开物 / 高校用云支持计划」）+ 一张平台满减券。
+      // 备注文案抄的是真实返回 —— 接口没有券类型字段，来源只能按这段文字认。
+      body = { Code: '200', Success: true, Data: [
+        {
+          CashCouponId: 1, CashCouponNo: 'Q-uni', NominalValue: '300.00', Balance: '240.21',
+          Status: 'Available', EffectiveTime: isoInDays(-30), ExpiryTime: isoInDays(300),
+          ApplicableScenarios: '阿里云按量付费账单',
+          Description: '高校用云支持计划云工开物代金券，限定品类可用，可用品类请参考云工开物页面：https://university.aliyun.com/ 说明。',
+        },
+        {
+          CashCouponId: 2, CashCouponNo: 'Q-full', NominalValue: '30.00', Balance: '30.00',
+          Status: 'Available', EffectiveTime: isoInDays(-1), ExpiryTime: isoInDays(20),
+          ApplicableScenarios: '阿里云新购',
+          Description: '【千问 AI 11.11】个人满600元减30元',
+        },
+      ] }
     }
     return { ok: true, status: 200, headers: { get: () => null }, async json() { return body } }
   }
@@ -74,8 +89,17 @@ test('配好凭据后，overview.json 走完真实取数链路并给出余额与
     // 余额与券
     assert.equal(b.balance.available, '26.72')
     assert.equal(b.balance.cash, '26.72')
-    assert.equal(b.coupons.availableBalance, '300.00')
-    assert.equal(b.coupons.items[0].no, 'Q-a')
+    // availableBalance 是**全量**（240.21 + 30.00），语义与 0.1.4 一致；
+    // 来源分组并列出，前端按用户口径选择看哪一组。
+    assert.equal(b.coupons.availableBalance, '270.21')
+    assert.equal(b.coupons.universityAvailableBalance, '240.21')
+    assert.equal(b.coupons.universityCouponCount, 1)
+    assert.equal(b.coupons.otherAvailableBalance, '30.00')
+    assert.equal(b.coupons.otherCouponCount, 1)
+    // 分类是宿主的活：前端只读 program，不重做关键词匹配
+    const byNo = Object.fromEntries(b.coupons.items.map((it) => [it.no, it]))
+    assert.equal(byNo['Q-uni'].program, 'university')
+    assert.equal(byNo['Q-full'].program, 'other')
 
     assert.ok(b.dataAsOf.balance > 0)
 
@@ -130,6 +154,10 @@ test('自带诊断日志：apply 与 overview 都落一行，且永不包含密�
   assert.match(text, /"event":"overview"/)
   assert.equal(text.includes('AKIDEXAMPLE'), false, '日志不得包含 AccessKeyId')
   assert.equal(text.includes('SECRETEXAMPLE'), false, '日志不得包含 AccessKeySecret')
+  // 券来源分组只记计数：排查「合计为什么是这个数」不需要把券备注抄进磁盘
+  assert.match(text, /"event":"coupon-split"/)
+  assert.match(text, /"university":1/)
+  assert.equal(text.includes('云工开物'), false, '日志不得包含券备注原文')
 })
 
 // ---------- 「测试连接」的落盘顺序 ----------
