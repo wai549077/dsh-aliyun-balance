@@ -114,6 +114,38 @@ const OVERVIEW_OK = {
 }
 const SETTINGS_OK = (extra) => ({ ok: true, settings: Object.assign({ hasAk: true, hasSk: true, balanceRefreshMs: 300000 }, extra || {}) })
 
+/**
+ * 真实双来源账户（v0.1.5「只看高校券」口径的用例）：
+ * 高校计划学生券剩 240.21 + 两张满减券共 360.00 —— 「601 还是 241」之争就是它。
+ *
+ * 聚合字段（universityAvailableBalance 等）由宿主算好，前端**只用 items 的 program 判口径**，
+ * 所以这里两边都要给全：program 缺一个，前端就会把它当满减券排除掉。
+ */
+const OVERVIEW_STUDENT = {
+  ...OVERVIEW_OK,
+  coupons: {
+    availableBalance: '600.21',
+    universityAvailableBalance: '240.21',
+    universityCouponCount: 1,
+    otherAvailableBalance: '360.00',
+    otherCouponCount: 2,
+    items: [
+      {
+        id: '1', no: 'Q-uni', nominalValue: '300.00', balance: '240.21', status: 'Available', expiryTime: EXP_LATER,
+        description: '高校用云支持计划云工开物代金券，限定品类可用…', program: 'university',
+      },
+      {
+        id: '2', no: 'Q-f1', nominalValue: '30.00', balance: '30.00', status: 'Available', expiryTime: EXP_SOON,
+        description: '【千问 AI 11.11】个人满600元减30元', program: 'other',
+      },
+      {
+        id: '3', no: 'Q-f2', nominalValue: '330.00', balance: '330.00', status: 'Available', expiryTime: EXP_SOON,
+        description: '满减券', program: 'other',
+      },
+    ],
+  },
+}
+
 /** 递归收集节点树可见文本 */
 function textOf(n) {
   if (!n) return ''
@@ -1347,7 +1379,7 @@ test('外观与挂件：隐藏边框开关——勾选后边框透明、悬停�
   api.S.open = true
   api.render()
   const chks = () => findAll(api.el.panel, (n) => n.tag === 'input' && n.type === 'checkbox')
-  assert.equal(chks().length, 3, '三个开关：锁定位置 + 隐藏边框 + 显示项的计价时段')
+  assert.equal(chks().length, 4, '四个开关：锁定位置 + 隐藏边框 + 只看高校券（显示项入口行）+ 计价时段（显示项展开体）')
   assert.equal(chks()[1].checked, false, '出厂态下隐藏边框开关应是**未勾选**的')
   const nb = chks()[1]
   nb.checked = true
@@ -1995,40 +2027,60 @@ test('关闭面板：关闭按钮 / Esc / 点面板外；点那一行仍走开�
   assert.equal(api.S.open, false)
 })
 
-test('显示项：计价时段开关 —— 关掉后悬停明细不再有那一行；点开关不展开分区；预设按钮不动它', async () => {
+test('显示项：入口行管口径、展开体管明细 —— 两个开关互不干扰，预设按钮都不动它们', async () => {
   const env = makeEnv([
-    { match: '/dsh-aliyun-balance/overview.json', payload: OVERVIEW_OK },
+    { match: '/dsh-aliyun-balance/overview.json', payload: OVERVIEW_STUDENT },
     { match: '/dsh-aliyun-balance/settings.json', payload: SETTINGS_OK() },
   ])
   await flush()
   const api = env.win.__DSHAB__
 
-  // 默认开：悬停卡片有那一行
+  // 默认开：悬停卡片有计价时段
   api.el.chip.dispatch('mouseenter')
   assert.ok(textOf(api.el.hover).includes('计价时段'), '默认应在悬停明细里显示')
   api.el.chip.dispatch('mouseleave')
 
-  // 第三个入口行 = 显示项，行上带内联开关（不展开就能开关）
+  // 第三个入口行 = 显示项：head 上的开关管「只看高校券」，摘要同时写出当前口径与时段
   api.S.open = true
   api.render()
   const heads = findAll(api.el.panel, (n) => n.className === 'dshab-sechead')
   const dHead = heads[2]
-  assert.ok(textOf(dHead).includes('计价时段'), '第三行应是「计价时段」')
+  assert.ok(textOf(dHead).includes('显示项'), '第三行应是「显示项」')
+  assert.ok(textOf(dHead).includes('只看高校券'), '不展开也要能看出当前口径')
+  assert.ok(/闲时|忙时/.test(textOf(dHead)), '不展开也要能看出当前时段')
   const ck = findAll(dHead, (n) => n.tag === 'input' && n.type === 'checkbox')[0]
   assert.ok(ck, '入口行上应有内联开关')
-  assert.equal(ck.checked, true, '默认勾选')
+  assert.equal(ck.checked, true, '只看高校券默认勾选')
 
   // 鲸鱼的坑②：点开关**不该**展开/收起分区 —— 否则想关掉它时会顺手把区拉开
   const before = api.S.sections.display === true
   ck.dispatch('click', { stopPropagation() {} })
   assert.equal(api.S.sections.display === true, before, '点开关不该改变展开状态')
 
-  // 关掉 → 落盘 + 悬停明细不再有那一行 + 入口行摘要变「已隐藏」
+  // 关掉「只看高校券」→ 合计回到全量、其它券行消失、落盘
   ck.checked = false
   ck.dispatch('change', { stopPropagation() {} })
-  assert.equal(JSON.parse(env.ls.getItem('dshab.prefs')).showPeak, false, '开关应落盘到 prefs')
+  assert.equal(JSON.parse(env.ls.getItem('dshab.prefs')).studentOnly, false, '开关应落盘到 prefs')
+  assert.ok(textOf(api.el.chip).includes('¥626.93'), '关掉后合计 = 全部券 600.21 + 余额 26.72')
   // ⚠️ 必须先关面板：`showHover()` 在 S.open 时会提前 return（面板与卡片会重叠），
   // 不关的话悬停读到的是上一次建的**旧内容**，断言就变成假的。
+  api.S.open = false
+  api.render()
+  api.el.chip.dispatch('mouseenter')
+  assert.ok(!textOf(api.el.hover).includes('其它券（未计入）'), '全量口径下没有「被排除」这一说')
+  assert.ok(textOf(api.el.hover).includes('券面值 / 已用'), '全量口径用旧标签')
+  api.el.chip.dispatch('mouseleave')
+
+  // 展开体里的计价时段开关（第 4 个 checkbox：锁定 / 隐藏边框 / 只看高校券 / 计价时段）
+  api.S.open = true
+  api.render()
+  const cks = () => findAll(api.el.panel, (n) => n.tag === 'input' && n.type === 'checkbox')
+  assert.equal(cks().length, 4, '显示项现在有两个开关：只看高校券（入口行）+ 计价时段（展开体）')
+  const peakCk = cks()[3]
+  assert.equal(peakCk.checked, true, '计价时段默认勾选')
+  peakCk.checked = false
+  peakCk.dispatch('change', { stopPropagation() {} })
+  assert.equal(JSON.parse(env.ls.getItem('dshab.prefs')).showPeak, false, '计价时段开关应落盘')
   api.S.open = false
   api.render()
   api.el.chip.dispatch('mouseenter')
@@ -2037,12 +2089,14 @@ test('显示项：计价时段开关 —— 关掉后悬停明细不再有那一
   api.S.open = true
   api.render()
   const heads2 = findAll(api.el.panel, (n) => n.className === 'dshab-sechead')
-  assert.ok(textOf(heads2[2]).includes('已隐藏'), '关掉后入口行摘要应显示「已隐藏」')
+  assert.ok(textOf(heads2[2]).includes('时段已隐藏'), '关掉后入口行摘要应显示「时段已隐藏」')
+  // 口径开关不受时段开关影响
+  assert.ok(textOf(heads2[2]).includes('全部券'), '口径仍是全部券（上一段关掉的那个）')
 
   // 开回来
-  const ck2 = findAll(heads2[2], (n) => n.tag === 'input' && n.type === 'checkbox')[0]
-  ck2.checked = true
-  ck2.dispatch('change', { stopPropagation() {} })
+  const peak2 = findAll(api.el.panel, (n) => n.tag === 'input' && n.type === 'checkbox')[3]
+  peak2.checked = true
+  peak2.dispatch('change', { stopPropagation() {} })
   api.S.open = false
   api.render()
   api.el.chip.dispatch('mouseenter')
@@ -2051,10 +2105,76 @@ test('显示项：计价时段开关 —— 关掉后悬停明细不再有那一
   api.S.open = true
   api.render()
 
-  // ⚠️ showPeak 是「显示项」不是「外观项」—— 与 locked 同理，两个预设按钮都不该动它
+  // ⚠️ showPeak / studentOnly 是「显示项」不是「外观项」—— 与 locked 同理，两个预设按钮都不该动它们
   const reset = findByText(api.el.panel, 'button', '恢复默认外观')[0]
   reset.dispatch('click', { stopPropagation() {} })
-  assert.equal(JSON.parse(env.ls.getItem('dshab.prefs')).showPeak, true, '恢复默认外观不该改 showPeak')
+  const saved = JSON.parse(env.ls.getItem('dshab.prefs'))
+  assert.equal(saved.showPeak, true, '恢复默认外观不该改 showPeak')
+  assert.equal(saved.studentOnly, false, '恢复默认外观也不该改 studentOnly')
+})
+
+test('券口径：默认只看高校计划券 —— 合计 / 构成 / 面值已用 / 失效时间 / 其它券行全部同口径', async () => {
+  const env = makeEnv([
+    { match: '/dsh-aliyun-balance/overview.json', payload: OVERVIEW_STUDENT },
+    { match: '/dsh-aliyun-balance/settings.json', payload: SETTINGS_OK() },
+  ])
+  await flush()
+  const api = env.win.__DSHAB__
+
+  // 240.21（学生券）+ 26.72（账户余额）；满减券 360.00 不计入
+  assert.ok(textOf(api.el.chip).includes('¥266.93'), '合计只算高校券 + 余额')
+
+  const d = api.derive(OVERVIEW_STUDENT)
+  assert.equal(d.couponScope, 'university')
+  assert.equal(d.scopedCouponBalance, '240.21')
+  assert.equal(d.excludedCoupons.length, 2, '两张满减券被排除')
+
+  api.el.chip.dispatch('mouseenter')
+  const ht = textOf(api.el.hover)
+  assert.ok(ht.includes('可用合计（高校券 + 阿里云余额）'), '标题要写明口径，别让人以为 266.93 是全部券')
+  assert.ok(ht.includes('高校券 ¥240.21'), '构成行只算学生券')
+  assert.ok(ht.includes('其它券（未计入）'), '被排除的券必须自己露出来，不能无声消失')
+  assert.ok(ht.includes('¥360.00 · 2 张'), '其它券金额与张数')
+  assert.ok(ht.includes('高校券面值 / 已用'), '面值标签跟着口径走')
+  assert.ok(ht.includes('¥300.00 / ¥59.79'), '面值 300、已用 59.79 —— 与主数自洽，不含满减券')
+  assert.ok(ht.includes(EXP_LATER.slice(0, 10)), '失效时间取高校券里最早那张')
+  assert.ok(!ht.includes(EXP_SOON.slice(0, 10)), '满减券的失效时间不该混进来（口径统一）')
+  assert.ok(!ht.includes('¥630.00'), '630 = 300 + 330，把满减券算进面值就是老 bug 的翻版')
+})
+
+test('券口径：没有高校计划券时自动按全部券统计 —— 合计不变，与 0.1.4 行为一致', async () => {
+  const env = makeEnv([
+    { match: '/dsh-aliyun-balance/overview.json', payload: OVERVIEW_OK },
+    { match: '/dsh-aliyun-balance/settings.json', payload: SETTINGS_OK() },
+  ])
+  await flush()
+  const api = env.win.__DSHAB__
+  const d = api.derive(OVERVIEW_OK)
+  assert.equal(d.couponScope, 'all', '没有学生券 → 回落全量（否则合计会变 0，反而吓人）')
+  assert.ok(textOf(api.el.chip).includes('¥326.72'), '旧夹具没有 program → 数字与 0.1.4 完全一致')
+  api.el.chip.dispatch('mouseenter')
+  assert.ok(!textOf(api.el.hover).includes('其它券（未计入）'), '全量口径不该有被排除行')
+  assert.ok(textOf(api.el.hover).includes('可用合计（券 + 阿里云余额）'), '标题用旧文案')
+  api.el.chip.dispatch('mouseleave')
+})
+
+test('券口径：过期的高校券不进合计与张数（分类只在可用券上求聚合）', async () => {
+  const env = makeEnv([
+    { match: '/dsh-aliyun-balance/overview.json', payload: OVERVIEW_STUDENT },
+    { match: '/dsh-aliyun-balance/settings.json', payload: SETTINGS_OK() },
+  ])
+  await flush()
+  const api = env.win.__DSHAB__
+  const p = JSON.parse(JSON.stringify(OVERVIEW_STUDENT))
+  p.coupons.items.push({
+    id: '9', no: 'Q-uni-old', nominalValue: '300.00', balance: '0.00', status: 'Expired',
+    expiryTime: EXPIRED, description: '高校用云支持计划云工开物代金券…', program: 'university',
+  })
+  const d = api.derive(p)
+  assert.equal(d.couponScope, 'university')
+  assert.equal(d.scopedCoupons.length, 1, '过期学生券不该进可用集合')
+  assert.equal(d.excludedCoupons.length, 2, '过期券也不该被当成「其它券」')
+  assert.equal(d.scopedCouponBalance, '240.21', '合计不受过期券影响')
 })
 
 test('三处浮层底色必须同源：悬停卡片 / 面板 / 「菜单」提示框用同一个 bg 令牌', async () => {
